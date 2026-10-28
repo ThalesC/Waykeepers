@@ -150,17 +150,16 @@ export class Enemy {
       this.dead=true;
       this.state='dead';
       this.group.visible=false;
+      this.attackActive=false;
       return;
     }
     if(heavy){
-      // interrupt windup
-      if(this.state==='windup'){
+      if(this.state==='windup' && this.staggerResist<=0){
         this.state='stagger';
         this.stateTimer=0;
         this.staggerResist=CFG.combat.staggerResist;
         this.attackActive=false;
         this.currentAttack=null;
-        // restart tell later (state idle after stagger)
       }
       // active attacks cannot be cancelled
     }

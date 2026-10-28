@@ -57,16 +57,27 @@ export function loadSave(){
     if(!raw) return null;
     const parsed = JSON.parse(raw);
     const v = validateSave(parsed);
+    if(v) lastValidRaw = raw;
     return v;
   }catch(e){ return null; }
 }
 
+let lastValidRaw = null;
 export function saveNow(){
   try{
     const s = getState();
-    localStorage.setItem(SAVE_KEY, JSON.stringify(s));
+    const raw = JSON.stringify(s);
+    // validate before writing
+    const v = validateSave(JSON.parse(raw));
+    if(!v) return false;
+    localStorage.setItem(SAVE_KEY, raw);
+    lastValidRaw = raw;
     return true;
-  }catch(e){ return false; }
+  }catch(e){
+    // retain last valid snapshot
+    if(lastValidRaw){ try{ localStorage.setItem(SAVE_KEY, lastValidRaw); }catch(_){} }
+    return false;
+  }
 }
 
 export function hasSave(){ return !!loadSave(); }

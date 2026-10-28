@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CFG } from './config.js';
-import { getState, setState, resetState, loadSave, saveNow, hasSave, defaultState } from './state.js';
+import { getState, setState, resetState, loadSave, saveNow as saveNowCore, hasSave, defaultState } from './state.js';
 import { initWorld } from './world.js';
 import { buildLevel } from './level.js';
 import { Player } from './player.js';
@@ -89,6 +89,7 @@ window.addEventListener('mousemove', e=>{
 renderer.domElement.addEventListener('click', ()=>{
   if(!mouseCaptured && !paused && !inMenu){ renderer.domElement.requestPointerLock(); }
 });
+window.addEventListener('blur', ()=>{ if(started && !paused){ paused=true; showPause(); document.exitPointerLock(); } });
 document.addEventListener('pointerlockchange', ()=>{
   mouseCaptured = document.pointerLockElement === renderer.domElement;
   if(!mouseCaptured && !paused){ paused=true; showPause(); }
@@ -119,9 +120,16 @@ window.addEventListener('keyup', e=>{
 });
 
 // ---------- Game state flow ----------
+function saveNow(){
+  const ok = saveNowCore();
+  if(ok){ showSaveIndicator(); }
+  else { showMsg('Save unavailable'); }
+  return ok;
+}
 let paused=false;
 let inMenu=true;
 let started=false;
+
 let lastCombatTime=0;
 let lastTime=performance.now();
 
@@ -172,6 +180,58 @@ document.getElementById('btnJournalClose').addEventListener('click', ()=>{ docum
 document.getElementById('btnSettings2').addEventListener('click', ()=>{ document.getElementById('settings').classList.remove('hidden'); });
 document.getElementById('btnTitle').addEventListener('click', ()=>{ paused=false; inMenu=true; document.getElementById('pause').classList.add('hidden'); document.getElementById('title').classList.remove('hidden'); started=false; document.exitPointerLock(); });
 document.getElementById('btnSettingsClose').addEventListener('click', ()=>{ document.getElementById('settings').classList.add('hidden'); saveSettings(); });
+document.getElementById('btnProjectBuy').addEventListener('click', ()=>{
+  const st=getState();
+  if(projectType==='workshop'){
+    if(st.progress.workshop){ showMsg('Already restored'); return; }
+    if(st.progress.salvage < 4){ showMsg('Need 4 Salvage'); return; }
+    st.progress.salvage -= 4;
+    st.progress.workshop = true;
+    st.player.spearUpgraded = true;
+    saveNow(); showSaveIndicator();
+    showMsg('Workshop restored. Spear upgraded.');
+  } else {
+    if(st.progress.beacon){ showMsg('Already restored'); return; }
+    if(st.progress.salvage < 8 || !st.progress.lens || st.progress.lensConsumed){ showMsg('Need 8 Salvage and Beacon Lens'); return; }
+    st.progress.salvage -= 8;
+    st.progress.lensConsumed = true;
+    st.progress.beacon = true;
+    st.progress.chapterComplete = true;
+    saveNow(); showSaveIndicator();
+    showMsg('Beacon restored. Chapter complete!');
+  }
+  document.getElementById('projectpanel').classList.add('hidden');
+  inMenu=false; paused=false; renderer.domElement.requestPointerLock();
+});
+document.getElementById('btnProjectClose').addEventListener('click', ()=>{ document.getElementById('projectpanel').classList.add('hidden'); inMenu=false; paused=false; renderer.domElement.requestPointerLock(); });
+
+document.getElementById('btnRest').addEventListener('click', ()=>{
+  if(!canRestNow()){ showMsg('Cannot rest now'); return; }
+  const st=getState();
+  if(restTarget==='brazier'){ st.progress.brazier=true; st.progress.activeCheckpoint='brazier'; }
+  else { st.progress.activeCheckpoint='camp'; }
+  if(restPlayer()){ saveNow(); showSaveIndicator(); showMsg('Rested'); }
+  document.getElementById('restmenu').classList.add('hidden'); inMenu=false; paused=false; renderer.domElement.requestPointerLock();
+});
+document.getElementById('btnTravel').addEventListener('click', ()=>{
+  if(!canRestNow()){ showMsg('Cannot travel now'); return; }
+  const st=getState();
+  const dest = (restTarget==='camp')?'brazier':'camp';
+  if(dest==='brazier' && !st.progress.brazier){ showMsg('Brazier not activated'); return; }
+  // perform rest reset at destination
+  st.progress.activeCheckpoint=dest;
+  // teleport player
+  const cp = checkpointPositions[dest];
+  player.resetToCheckpoint(cp);
+  player.applySavePlayer();
+  for(const e of enemies){ if(!e.dead) e.reset(); }
+  if(!bossDefeated && bossActive){ boss.reset(); bossActive=false; }
+  st.player.health=player.health; st.player.stamina=player.stamina; st.player.heals=player.heals;
+  saveNow(); showSaveIndicator(); showMsg('Traveled');
+  document.getElementById('restmenu').classList.add('hidden'); inMenu=false; paused=false; renderer.domElement.requestPointerLock();
+});
+document.getElementById('btnRestClose').addEventListener('click', ()=>{ document.getElementById('restmenu').classList.add('hidden'); inMenu=false; paused=false; renderer.domElement.requestPointerLock(); });
+
 
 function applyStateToGame(){
   st = getState();
@@ -264,9 +324,14 @@ function doInteract(){
   });
 }
 
+function canRestNow(){
+  const engaged = engagedEnemies().length>0;
+  if(engaged) return false;
+  if(isCombatRecent()) return false;
+  return true;
+}
 function restPlayer(){
-  // disable if enemy engaged or within 5s combat
-  if(isCombatRecent()) { showMsg('Cannot rest now'); return; }
+  if(!canRestNow()){ showMsg('Cannot rest now'); return false; }
   player.health=100; player.stamina=100; player.heals=2;
   // reset enemies
   for(const e of enemies){ if(!e.dead) e.reset(); }
@@ -274,34 +339,50 @@ function restPlayer(){
   if(!bossDefeated && bossActive){ boss.reset(); bossActive=false; }
   // reset attack volumes cleared
   getState().player.health=player.health; getState().player.stamina=player.stamina; getState().player.heals=player.heals;
+  return true;
 }
 
+let restTarget=null;
+function openRestMenu(target){
+  restTarget=target;
+  const st=getState();
+  const other = target==='camp'?'brazier':'camp';
+  // travel available if other rest point activated
+  const otherActivated = (target==='camp') ? st.progress.brazier : true; // camp always active
+  document.getElementById('btnTravel').disabled = !otherActivated || !canRestNow();
+  document.getElementById('restmenu').classList.remove('hidden');
+  inMenu=true; paused=true; document.exitPointerLock();
+}
 function isCombatRecent(){
   return (performance.now()/1000 - lastCombatTime) < 5;
 }
 
+let projectType=null;
+function openProjectPanel(type){
+  projectType=type;
+  const st=getState();
+  const info=document.getElementById('projectInfo');
+  if(type==='workshop'){
+    document.getElementById('projectTitle').textContent='Restore Workshop';
+    info.textContent='Cost: 4 Salvage. You have: '+st.progress.salvage+'. Benefit: spear damage 30/54.';
+  } else {
+    document.getElementById('projectTitle').textContent='Restore Bridge Beacon';
+    info.textContent='Cost: 8 Salvage + Beacon Lens. You have: '+st.progress.salvage+' Salvage, Lens: '+(st.progress.lens&&!st.progress.lensConsumed?'yes':'no')+'. Benefit: complete Light the Road.';
+  }
+  document.getElementById('projectpanel').classList.remove('hidden');
+  inMenu=true; paused=true; document.exitPointerLock();
+}
 function attemptWorkshop(){
   const st=getState();
   if(st.progress.workshop){ showMsg('Workshop already restored'); return; }
-  if(st.progress.salvage < 4){ showMsg('Need 4 Salvage'); return; }
-  st.progress.salvage -= 4;
-  st.progress.workshop = true;
-  st.player.spearUpgraded = true;
-  saveNow(); showSaveIndicator();
-  showMsg('Workshop restored. Spear upgraded.');
+  openProjectPanel('workshop');
 }
-
 function attemptBeacon(){
   const st=getState();
   if(st.progress.beacon){ showMsg('Beacon already restored'); return; }
-  if(st.progress.salvage < 8 || !st.progress.lens || st.progress.lensConsumed){ showMsg('Need 8 Salvage and Beacon Lens'); return; }
-  st.progress.salvage -= 8;
-  st.progress.lensConsumed = true;
-  st.progress.beacon = true;
-  st.progress.chapterComplete = true;
-  saveNow(); showSaveIndicator();
-  showMsg('Beacon restored. Chapter complete!');
+  openProjectPanel('beacon');
 }
+
 
 function talkMara(){
   const st=getState();
@@ -432,22 +513,23 @@ function updateLockOn(){
 
 // enemy engagement limiter
 function engagedEnemies(){
-  // at most 2 ordinary enemies engage; one windup/active at a time
   const alive = enemies.filter(e=>!e.dead);
-  // distance to player < 25 considered engaged
   const near = alive.filter(e=>player.pos.distanceTo(e.pos)<25);
-  // choose up to 2
+  near.sort((a,b)=>player.pos.distanceTo(a.pos)-player.pos.distanceTo(b.pos));
   return near.slice(0,2);
 }
 
 let lastAttackOrDamageTime = performance.now()/1000;
+let chapterBoundaryShown=false;
 function markCombat(){ lastCombatTime = performance.now()/1000; lastAttackOrDamageTime=lastCombatTime; }
 
 // ---------- Update loop ----------
 showTitle();
 
 function loop(now){
-  requestAnimationFrame(loop);
+  
+
+requestAnimationFrame(loop);
   const dt = Math.min(0.05, (now-lastTime)/1000);
   lastTime=now;
   if(inMenu||paused||!started){
@@ -535,7 +617,7 @@ function loop(now){
 
   // enemy attacks damage player
   for(const e of engaged){
-    if(e.dead) continue;
+    if(e.dead && !e.attackActive) continue;
     if(e.attackActive && e.currentAttack){
       const c = e.atkCfg;
       const reach = c.reach;
@@ -611,13 +693,14 @@ function loop(now){
         } else if(near.type==='keepsake'){
           if(!st.progress.keepsake){ st.progress.keepsake=true; saveNow(); showSaveIndicator(); showMsg('Keepsake found'); }
         } else if(near.type==='brazier'){
-          st.progress.brazier=true; st.progress.activeCheckpoint='brazier'; restPlayer(); saveNow(); showSaveIndicator(); showMsg('Brazier lit');
+          st.progress.brazier=true;
+          openRestMenu('brazier');
         } else if(near.type==='hearth'){
-          st.progress.activeCheckpoint='camp'; restPlayer(); saveNow(); showSaveIndicator();
+          openRestMenu('hearth');
         } else if(near.type==='shortcut'){
           if(!st.progress.shortcut){ st.progress.shortcut=true; removeShortcutWall(); saveNow(); showSaveIndicator(); showMsg('Shortcut opened'); }
         } else if(near.type==='workshop'){ attemptWorkshop(); }
-        else if(near.type==='beacon'){ attemptBeacon(); }
+        else if(near.type==='beacon'){ attemptBeacon(); showMsg('Objective: defeat Gate Warden, recover Beacon Lens, restore beacon.'); }
         else if(near.type==='mara'){ talkMara(); }
       }
     }
@@ -640,6 +723,12 @@ function loop(now){
   // update HUD
   updateHUD();
 
+  // chapter boundary
+  if(st.progress.chapterComplete && !chapterBoundaryShown && (player.pos.z>250 || player.pos.z<-30 || player.pos.x>58 || player.pos.x<-58)){ chapterBoundaryShown=true; showMsg('Chapter complete. The road ahead is not yet built.'); }
+  if(st.progress.keepsake && !window.__keepsakeMesh){
+    const m=new THREE.Mesh(new THREE.BoxGeometry(0.3,0.3,0.3), new THREE.MeshStandardMaterial({color:0xffd700}));
+    m.position.set(0.5,1.0,0); scene.add(m); window.__keepsakeMesh=m;
+  }
   // camera
   updateCamera();
 
@@ -655,6 +744,8 @@ function onBossDefeated(){
   bossDefeated=true;
   boss.group.visible=false;
   boss.dead=true;
+  boss.attackActive=false;
+  boss.currentAttack=null;
   bossActive=false;
   saveNow(); showSaveIndicator();
   showMsg('Gate Warden defeated. Beacon Lens recovered.');
@@ -706,5 +797,7 @@ function updateJournal(){
   const txt = `Objective: ${st.progress.beacon?'Chapter complete':st.progress.bossDefeated?'Restore beacon':'Defeat Warden'}\nRest points: camp${st.progress.brazier?', field brazier':''}\nShortcut: ${st.progress.shortcut?'open':'closed'}\nKeepsake: ${st.progress.keepsake?'found':'not found'}\nCaches: ${st.progress.claimedCaches.join(',')||'none'}\nSalvage: ${st.progress.salvage}`;
   document.getElementById('journalText').innerText=txt;
 }
+
+
 
 requestAnimationFrame(loop);

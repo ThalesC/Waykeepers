@@ -14,17 +14,18 @@ export class Boss {
     this.dead=false;
     this.state='idle'; // idle, approach, windup, active, recovery, transition, dead
     this.stateTimer=0;
-    this.attackSeq=[]; // list of attack keys for phase
-    this.attackIndex=0;
     this.currentAttack=null; // {key, id}
     this.attackActive=false;
     this.attackHitSet=new Set();
-    this.attackTimer=0;
     this.phase=1;
     this.transitionDone=false;
-    this.pendingDouble=false;
-    this.secondSweepTimer=0;
-    this.waitingSecond=false;
+    this.transitionPending=false;
+    this.lastKey=null;
+    this.cycleIndex=0;
+    this.pendingSecond=false; // waiting to do second sweep
+    this.secondDelay=0;
+    this.doingSecond=false;
+    this._idCounter=0;
   }
   reset(){
     this.pos.copy(this.startPos);
@@ -35,45 +36,47 @@ export class Boss {
     this.stateTimer=0;
     this.phase=1;
     this.transitionDone=false;
-    this.attackActive=false;
+    this.transitionPending=false;
     this.currentAttack=null;
+    this.attackActive=false;
+    this.attackHitSet=new Set();
+    this.lastKey=null;
+    this.cycleIndex=0;
+    this.pendingSecond=false;
+    this.secondDelay=0;
+    this.doingSecond=false;
     this.group.visible=true;
   }
+  nextId(){ this._idCounter++; return this._idCounter; }
   update(dt, player){
     if(this.dead) return;
     const ppos=player.pos;
     const dist=this.pos.distanceTo(ppos);
     const toP=new THREE.Vector3().subVectors(ppos,this.pos);
     const targetYaw=Math.atan2(toP.x,toP.z);
-    // phase check
+
+    // transition trigger
     if(!this.transitionDone && this.health <= CFG.boss.hp*0.5){
-      // finish current action then transition
-      if(this.state==='recovery' || this.state==='idle'){
-        this.state='transition';
-        this.stateTimer=0;
-        this.transitionDone=true;
-      }
+      this.transitionPending=true;
     }
+
     switch(this.state){
       case 'idle':
       case 'approach': {
+        if(this.transitionPending && (this.state==='idle')){
+          // finish current action -> transition now
+          this.state='transition'; this.stateTimer=0; this.transitionPending=false; this.transitionDone=true; this.phase=2;
+          break;
+        }
         if(dist > CFG.boss.stopDist){
           this.state='approach';
-          const dir=toP.clone(); dir.y=0; dir.normalize();
-          this.pos.x += dir.x*CFG.boss.speed*dt;
-          this.pos.z += dir.z*CFG.boss.speed*dt;
+          const dir=toP.clone(); dir.y=0;
+          if(dir.length()>0.01){ dir.normalize(); this.pos.x += dir.x*CFG.boss.speed*dt; this.pos.z += dir.z*CFG.boss.speed*dt; }
           this.yaw=targetYaw;
         } else {
-          this.state='idle';
-          // choose next attack
-          if(this.stateTimer===0){
-            this.stateTimer=0.01;
-          }
-        }
-        // trigger attack after small delay when in range and idle
-        if(this.state==='idle' && dist<=CFG.boss.stopDist){
+          if(this.state!=='idle'){ this.state='idle'; this.stateTimer=0; }
           this.stateTimer += dt;
-          if(this.stateTimer>0.3){
+          if(this.stateTimer > 0.3){
             this.startNextAttack();
           }
         }
@@ -82,18 +85,14 @@ export class Boss {
       case 'transition': {
         this.stateTimer+=dt;
         if(this.stateTimer>=1.0){
-          this.phase=2;
-          this.state='idle';
-          this.stateTimer=0;
+          this.state='idle'; this.stateTimer=0;
         }
-        // harmless
         break;
       }
       case 'windup': {
         this.stateTimer+=dt;
-        const atk=this.currentAttackKey();
-        const c = atk==='A'?CFG.boss.A:CFG.boss.B;
-        // stop facing adjust 0.30 before release
+        const key=this.currentAttack.key;
+        const c = key==='A'?CFG.boss.A:CFG.boss.B;
         if(this.stateTimer < c.tell-0.30){
           this.yaw=targetYaw;
         }
@@ -107,47 +106,51 @@ export class Boss {
       }
       case 'active': {
         this.stateTimer+=dt;
-        const atk=this.currentAttackKey();
-        const c = atk==='A'?CFG.boss.A:CFG.boss.B;
+        const key=this.currentAttack.key;
+        const c = key==='A'?CFG.boss.A:CFG.boss.B;
         if(this.stateTimer>=c.active){
           this.state='recovery';
           this.stateTimer=0;
           this.attackActive=false;
-          // if double sweep phase2 first sweep, schedule second
-          if(this.phase===2 && atk==='A' && !this.waitingSecond && this.pendingDouble){
-            this.waitingSecond=true;
-            this.secondSweepTimer=0.85; // after first active window ends? spec: second occurs 0.85s after first active window ends
+          // schedule second sweep if doing double
+          if(this.doingSecond){
+            // this was first of double; schedule second
+            this.doingSecond=false;
+            this.pendingSecond=true;
+            this.secondDelay=0.85;
           }
         }
         break;
       }
       case 'recovery': {
         this.stateTimer+=dt;
-        const atk=this.currentAttackKey();
-        const c = atk==='A'?CFG.boss.A:CFG.boss.B;
-        // recovery after second strike is 2s handled by c.rec? For double, recovery 2.0
-        let rec=c.rec;
-        if(this.waitingSecond){
-          // waiting for second sweep trigger
-          this.secondSweepTimer-=dt;
-          if(this.secondSweepTimer<=0){
-            this.waitingSecond=false;
+        const key=this.currentAttack.key;
+        let rec = (key==='A'?CFG.boss.A.rec:CFG.boss.B.rec);
+        // if pending second, wait delay then start second
+        if(this.pendingSecond){
+          this.secondDelay -= dt;
+          if(this.secondDelay<=0){
+            this.pendingSecond=false;
             // start second sweep
-            this.currentAttack={key:'A', id:++this.attackSeqCounter};
+            this.currentAttack={key:'A', id:this.nextId()};
             this.state='windup';
             this.stateTimer=0;
             this.attackActive=false;
             this.attackHitSet=new Set();
-            this.pendingDouble=false;
+            this.doingSecond=false;
+            // mark that recovery after this second is 2.0 (handled by rec override? we'll set a flag)
+            this._secondRecovery=true;
             return;
           }
+          // no recovery countdown until second? just wait
+          return;
         }
+        if(this._secondRecovery){ rec=2.0; }
         if(this.stateTimer>=rec){
-          // if pending double sweep? handle via attack sequence
           this.state='idle';
           this.stateTimer=0;
           this.currentAttack=null;
-          this.pendingDouble=false;
+          this._secondRecovery=false;
         }
         break;
       }
@@ -155,38 +158,32 @@ export class Boss {
     this.group.position.copy(this.pos);
     this.group.rotation.y=this.yaw;
   }
-  currentAttackKey(){
-    return this.currentAttack?this.currentAttack.key:'A';
-  }
-  get attackSeqCounter(){ if(this._c===undefined) this._c=0; return this._c; }
-  set attackSeqCounter(v){ this._c=v; }
   startNextAttack(){
+    let key;
+    let isDouble=false;
+    if(this.phase===1){
+      key = (this.lastKey==='A')?'B':'A';
+    } else {
+      // cycle: 0 A, 1 B, 2 AA
+      const mod = this.cycleIndex % 3;
+      if(mod===0){ key='A'; }
+      else if(mod===1){ key='B'; }
+      else { key='A'; isDouble=true; }
+      this.cycleIndex++;
+    }
+    this.lastKey=key;
+    this.currentAttack={key, id:this.nextId()};
     this.state='windup';
     this.stateTimer=0;
     this.attackActive=false;
     this.attackHitSet=new Set();
-    // determine attack key
-    let key;
-    if(this.phase===1){
-      // alternate A,B
-      key = (this.lastKey==='A')?'B':'A';
-    } else {
-      // cycle A,B,AA (double sweep)
-      // simple: track counter
-      if(!this._cycle) this._cycle=0;
-      const seq=['A','B','A']; // third triggers double? We'll handle double when A in phase2 maybe every third
-      // We'll do: if cycle==2 -> double sweep (A then A)
-      key = (this._cycle%3===1)?'B':'A';
-      this.pendingDouble = (this._cycle%3===2);
-      this._cycle++;
-    }
-    this.lastKey=key;
-    this.currentAttack={key, id:++this._c};
+    this.doingSecond=isDouble;
+    this.pendingSecond=false;
   }
+  currentAttackKey(){ return this.currentAttack?this.currentAttack.key:'A'; }
   takeDamage(amount){
     if(this.dead) return;
     this.health=Math.max(0,this.health-amount);
-    if(this.health<=0){ this.dead=true; this.state='dead'; this.group.visible=false; }
+    if(this.health<=0){ this.dead=true; this.state='dead'; this.group.visible=false; this.attackActive=false; }
   }
-  isInvulnerable(){ return false; }
 }

@@ -139,6 +139,7 @@ export class Player {
         // sprint cost
         if(this.state==='sprint'){
           this.stamina = Math.max(0, this.stamina - CFG.player.sprintCost*dt);
+          this._noSpend=0;
           if(this.stamina<=0){ this.state='move'; speed=CFG.player.speed; }
         }
         // apply movement
@@ -265,6 +266,7 @@ export class Player {
   }
   startDodge(move,input){
     this.stamina=Math.max(0,this.stamina-CFG.player.dodgeCost);
+    this._noSpend=0;
     this.state='dodge';
     this.stateTimer=0;
     if(move.length()>0.1){
@@ -284,6 +286,7 @@ export class Player {
     }
     // check lock target facing? no
     this.stamina=Math.max(0,this.stamina-c.stam);
+    this._noSpend=0;
     this.state = type==='light'?'attack_light':'attack_heavy';
     this.attackTimer=0;
     this.attackPhase='windup';
@@ -368,7 +371,11 @@ export class Player {
       const nb=new THREE.Box3(new THREE.Vector3(nx-0.35, this.pos.y, this.pos.z-0.35), new THREE.Vector3(nx+0.35, this.pos.y+1.2, this.pos.z+0.35));
       if(!collidesWall(nb)) this.pos.x=nx; else this.vel.x=0;
     }
-    // Z done
+    {
+      const nz=this.pos.z+stepZ;
+      const nb=new THREE.Box3(new THREE.Vector3(this.pos.x-0.35, this.pos.y, nz-0.35), new THREE.Vector3(this.pos.x+0.35, this.pos.y+1.2, nz+0.35));
+      if(!collidesWall(nb)) this.pos.z=nz; else this.vel.z=0;
+    }
     // ground
     const gh=groundHeight(this.pos.x,this.pos.z);
     if(gh!==null){

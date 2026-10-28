@@ -17,3 +17,12 @@
 - 🌍 [Create with OMGithub](https://omgithub.com).
 - 🧬 [Explore the remix source](https://github.com/ThalesC/Waykeepers).
 <!-- omgithub:readme:end -->
+
+## Run
+
+```
+npm install
+npm run dev
+```
+
+Open the printed local URL in a browser. For production build: `npm run build` then `npm run preview`.
